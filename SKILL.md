@@ -36,5 +36,5 @@ Read `OUTDIR/report.md` first (one row per second: speech Â· AudioSet sounds ðŸŽ
 
 ## Limits (tell the user)
 - CLAP labels are guesses, not proof.
-- An exact meme-sound name is found only if that file is in the pack; pitched/sped-up versions are not matched.
+- An exact meme-sound name is found only if that file is in the pack. Pitch-shifted versions and pure synthetic tones are not matched; a speed-up without pitch change usually is.
 - Song titles are not identified (use Shazam/songrec).
