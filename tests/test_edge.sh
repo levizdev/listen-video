@@ -9,7 +9,7 @@ mkdir -p "$T/pack/sub" && touch "$T/pack/readme.txt"
 ff -f lavfi -i "anoisesrc=d=0.3:c=white:a=0.9:seed=3,highpass=f=4000" "$T/pack/beep.wav"   # a loud hiss (pure tones are NOT fingerprintable, see README)
 ff -f lavfi -i "anoisesrc=d=0.6:c=pink:a=0.8,highpass=f=2000" "$T/pack/sub/шум кириллица.mp3"
 # 1 normal: noise bed + planted hiss at 3.0 s and noise burst at 6.0 s
-ff -f lavfi -i "anoisesrc=d=10:c=brown:a=0.05" -i "$T/pack/beep.wav" -i "$T/pack/sub/шум кириллица.mp3" \
+ff -f lavfi -i "anoisesrc=d=10:c=brown:a=0.05:seed=1" -i "$T/pack/beep.wav" -i "$T/pack/sub/шум кириллица.mp3" \
    -filter_complex "[1]adelay=3000:all=1[a];[2]adelay=6000:all=1[b];[0][a][b]amix=3:normalize=0" "$T/mix.wav"
 ff -f lavfi -i "color=c=black:s=320x240:d=10" -i "$T/mix.wav" -shortest -c:v libx264 -c:a aac "$T/normal video.mp4"
 ff -f lavfi -i "color=c=black:s=320x240:d=3" -c:v libx264 "$T/noaudio.mp4"             # 2 no audio stream
