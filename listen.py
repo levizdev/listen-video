@@ -32,6 +32,7 @@ import fp  # noqa: E402
 AST_ID = 'MIT/ast-finetuned-audioset-10-10-0.4593'
 CLAP_ID = 'laion/clap-htsat-unfused'
 WIN, STEP, BATCH = 1.0, 0.5, 16
+SPEECH_GATE = 0.5          # AudioSet 'Speech' probability above which CLAP guesses are treated as doubtful
 SPEECHY = {'Speech', 'Male speech, man speaking', 'Female speech, woman speaking', 'Narration, monologue',
            'Conversation', 'Child speech, kid speaking', 'Inside, small room', 'Silence', 'Music'}
 PROMPTS = [
@@ -72,8 +73,12 @@ def merge(evs, gap=0.6):
         if out and out[-1]['label'] == e['label'] and e['t'] - out[-1]['t1'] <= gap:
             out[-1]['t1'] = e['t'] + WIN
             out[-1]['p'] = max(out[-1]['p'], e['p'])
+            if e.get('over_speech'):
+                out[-1]['over_speech'] = True
         else:
             out.append({'label': e['label'], 't0': e['t'], 't1': e['t'] + WIN, 'p': e['p']})
+            if e.get('over_speech'):
+                out[-1]['over_speech'] = True
     return sorted(out, key=lambda e: e['t0'])
 
 
@@ -115,6 +120,8 @@ def ast_tags(y16, starts, D):
             p = torch.sigmoid(model(**x).logits).numpy()
             rows += list(zip(starts[i:i + BATCH], p))
     music_idx = [k for k, v in L.items() if v == 'Music'][0]
+    speech_idx = [k for k, v in L.items() if v == 'Speech'][0]
+    speech_p = {t: float(row[speech_idx]) for t, row in rows}
     evs = []
     for t, row in rows:
         for k in np.argsort(row)[::-1][:6]:
@@ -132,10 +139,10 @@ def ast_tags(y16, starts, D):
     if cur:
         music.append(cur)
     music = [{'t0': round(s, 2), 't1': round(min(D, e), 2)} for s, e in music if e - s >= 1.5]
-    return events, music
+    return events, music, speech_p
 
 
-def clap_guess(y48, starts, D, extra):
+def clap_guess(y48, starts, D, extra, speech_p):
     import torch
     from transformers import ClapModel, ClapProcessor
     log('meme-sound guesses: CLAP')
@@ -158,8 +165,13 @@ def clap_guess(y48, starts, D, extra):
                 pr = np.exp((s - s.max()) * 30)
                 pr /= pr.sum()
                 k = int(np.argmax(pr))
-                if prompts[k] not in NEUTRAL and pr[k] >= 0.35:
-                    zs.append({'t': t, 'label': prompts[k], 'p': round(float(pr[k]), 2)})
+                if prompts[k] in NEUTRAL:
+                    continue
+                # over clear speech CLAP often mislabels the voice itself ("bruh", "glass breaking"):
+                # demand more confidence there and flag it
+                over = speech_p.get(t, 0.0) >= SPEECH_GATE
+                if pr[k] >= (0.6 if over else 0.35):
+                    zs.append({'t': t, 'label': prompts[k], 'p': round(float(pr[k]), 2), 'over_speech': over})
     return [dict(e, t0=round(e['t0'], 2), t1=round(min(D, e['t1']), 2)) for e in merge(zs)]
 
 
@@ -200,12 +212,14 @@ def write_md(rep, path, min_word_p=0.3):
     head = [f"# Слух: {rep['file']}",
             f"Длительность {D:.1f} с · язык {rep.get('language', '-')} · темп ~{rep.get('tempo_bpm', '-')} BPM · "
             f"событий {len(rep.get('sound_events', []))} · совпадений с паком {len(rep.get('pack_matches', []))}",
-            '', 'Слова с уверенностью < 0.3 показаны в скобках — часто это галлюцинации Whisper на музыке.', '',
+            '', 'Слова с уверенностью < 0.3 — в скобках (часто галлюцинации Whisper на музыке). '
+            'CLAP-догадка со знаком ? сделана поверх речи — проверяй на слух.', '',
             '| t, с | Речь | Звуки (AudioSet) | CLAP-догадка | Совпадение с паком | Удар |', '|---|---|---|---|---|---|']
     for s in range(int(math.ceil(D))):
         sp = ' '.join(w['w'] if w.get('p', 1) >= min_word_p else f"({w['w']})" for w in words if s <= w['s'] < s + 1)
         ev = ', '.join(sorted({e['label'] for e in rep.get('sound_events', []) if e['t0'] < s + 1 and e['t1'] > s}))
-        cg = ', '.join(sorted({e['label'] for e in rep.get('clap_guess', []) if e['t0'] < s + 1 and e['t1'] > s}))
+        cg = ', '.join(sorted({e['label'] + ('?' if e.get('over_speech') else '')
+                               for e in rep.get('clap_guess', []) if e['t0'] < s + 1 and e['t1'] > s}))
         mt = ', '.join(f"{m['sound']} ({m['frac']})" for m in rep.get('pack_matches', []) if s <= m['t'] < s + 1)
         ht = '●' if any(s <= h < s + 1 for h in rep.get('hits', [])) else ''
         mu = ' 🎵' if any(m['t0'] <= s < m['t1'] for m in rep.get('music_segments', [])) else ''
@@ -261,9 +275,9 @@ def main():
     torch.set_num_threads(max(1, os.cpu_count() or 1))
     starts = windows(D)
     rep['words'] = [] if a.no_asr else asr(a, y16, rep)
-    rep['sound_events'], rep['music_segments'] = ast_tags(y16, starts, D)
+    rep['sound_events'], rep['music_segments'], speech_p = ast_tags(y16, starts, D)
     extra = [l.strip() for l in open(a.prompts, encoding='utf-8') if l.strip()] if a.prompts else []
-    rep['clap_guess'] = clap_guess(y48, starts, D, extra)
+    rep['clap_guess'] = clap_guess(y48, starts, D, extra, speech_p)
     rep['pack_matches'] = []
     if a.pack:
         if not os.path.isdir(a.pack):
